@@ -6,7 +6,6 @@
 - Pealse follow [this link](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html) to install pytorch geometric
 - You can install other required modules by conducting
   `pip install -r requirements.txt`
-  `pip install transformers`
 
 ## Data Preparation
 
