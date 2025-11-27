@@ -20,7 +20,7 @@ loss_weights:
   SeqCTC: 1.0 
   ConvCTC: 1.0
   Dist: 25.0
-load_weights: /root/data1/ywy23/Best_Models/DMLG/16.98_18.10.pt
+load_weights: False
 load_checkpoints:  False
 optimizer_args:
   optimizer: Adam

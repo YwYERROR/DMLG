@@ -1,4 +1,4 @@
-dataset_root: /root/data1/Datasets/CSLR/CSL-daily
+dataset_root: /your_path
 dict_path: ./preprocess/CSL-Daily/gloss_dict.npy
 evaluation_dir: ./evaluation/slr_eval
 evaluation_prefix: CSL-Daily-groundtruth
