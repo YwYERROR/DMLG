@@ -10,8 +10,8 @@
 ## Data Preparation
 
 1. PHOENIX14 dataset: Download the RWTH-PHOENIX-Weather 2014 Dataset [[download link]](https://www-i6.informatik.rwth-aachen.de/~koller/RWTH-PHOENIX/).
-2. PHOENIX14-T datasetDownload the RWTH-PHOENIX-Weather 2014 Dataset [[download link]](https://www-i6.informatik.rwth-aachen.de/~koller/RWTH-PHOENIX-2014-T/)
-3. CSL-Daily dataset： Request the CSL Dataset from this website [[download link]](https://ustc-slr.github.io/openresources/cslr-dataset-2015/index.html)
+2. PHOENIX14-T dataset: Download the RWTH-PHOENIX-Weather 2014 Dataset [[download link]](https://www-i6.informatik.rwth-aachen.de/~koller/RWTH-PHOENIX-2014-T/)
+3. CSL-Daily dataset: Request the CSL Dataset from this website [[download link]](https://ustc-slr.github.io/openresources/cslr-dataset-2015/index.html)
 
 Download datasets and extract them.
 You don't need any further data preprocessing.
@@ -23,9 +23,9 @@ Here we provide the best performance checkpoints.
 
 | Dataset    | Backbone | Dev WER | Test WER | Pretrained model                                                                                                          |
 | ---------- | -------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Phoenix14  | Resnet34 | 16.98   | 17.51    | [[Google Drive]](https://drive.google.com/drive/folders/1GIRjSSunMGwgOp8JqlK3x7ERct4nv5tf?dmr=1&ec=wgc-drive-globalnav-goto) |
-| Phoenix14-T | Resnet34 | 16.68   | 18.23    | [[Google Drive]](https://drive.google.com/drive/folders/102_9th1pHyiv698qx6lznP7PMX07nIY3?dmr=1&ec=wgc-drive-globalnav-goto) |
-| CSL-Daily  | Resnet34 | 25.08  | 24.27    | [[Google Drive]](https://drive.google.com/drive/folders/1xTAaS70KTHLajONwEJSL4npcWXguulwp?dmr=1&ec=wgc-drive-globalnav-goto) |
+| Phoenix14  | ResNet34 | 16.98   | 17.51    | [[Google Drive]](https://drive.google.com/drive/folders/1GIRjSSunMGwgOp8JqlK3x7ERct4nv5tf?dmr=1&ec=wgc-drive-globalnav-goto) |
+| Phoenix14-T | ResNet34 | 16.68   | 18.23    | [[Google Drive]](https://drive.google.com/drive/folders/102_9th1pHyiv698qx6lznP7PMX07nIY3?dmr=1&ec=wgc-drive-globalnav-goto) |
+| CSL-Daily  | ResNet34 | 25.08  | 24.27    | [[Google Drive]](https://drive.google.com/drive/folders/1xTAaS70KTHLajONwEJSL4npcWXguulwp?dmr=1&ec=wgc-drive-globalnav-goto) |
 
 
 ### Training
