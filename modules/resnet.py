@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
+import torch.nn.functional as F
 from einops import rearrange
 from modules.gcn_lib.torch_vertex import Grapher
 from modules.gcn_lib.temporalgraph import TemporalFeatureGraph
@@ -64,17 +65,22 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
 
-        # Graph modules
-        self.localG = Grapher(in_channels=256, kernel_size=3, n=14 * 14, relative_pos=True)
-        self.localG2 = Grapher(in_channels=512, kernel_size=4, n=7 * 7, relative_pos=True)
-        self.temporalG = TemporalFeatureGraph(k=14 * 14 // 4,
-                                              in_channels=256,
-                                              initial_threshold=0.9,
-                                              threshold_decay=0.1,
-                                              layer_idx=1,
-                                              use_dynamic_threshold=True)
-        self.temporalG2 = TemporalFeatureGraph(k=7 * 7, in_channels=512)
-        self.alpha = nn.Parameter(torch.ones(4), requires_grad=True)
+        # DMLG graph stages operate on the final convolutional feature map before pooling.
+        stage_nodes = [7 * 7, 4 * 4, 2 * 2, 1 * 1]
+        self.frame_graphs = nn.ModuleList([
+            Grapher(in_channels=512, kernel_size=3, n=n, relative_pos=True, expansion_rate=1)
+            for n in stage_nodes
+        ])
+        self.cross_frame_graphs = nn.ModuleList([
+            TemporalFeatureGraph(k=max(1, n // 4),
+                                 in_channels=512,
+                                 initial_threshold=0.8,
+                                 threshold_decay=0.05,
+                                 layer_idx=idx + 1,
+                                 use_dynamic_threshold=True)
+            for idx, n in enumerate(stage_nodes)
+        ])
+        self.alpha = nn.Parameter(torch.ones(4, 2), requires_grad=True)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
@@ -103,33 +109,56 @@ class ResNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _stage_size(height, width, stage_idx):
+        stride = 2 ** stage_idx
+        return max(1, (height + stride - 1) // stride), max(1, (width + stride - 1) // stride)
+
+    @staticmethod
+    def _spatial_pool(x, output_size):
+        if x.shape[-2:] == output_size:
+            return x
+        b, c, t, h, w = x.shape
+        x = rearrange(x, 'b c t h w -> (b t) c h w')
+        x = F.adaptive_avg_pool2d(x, output_size=output_size)
+        return rearrange(x, '(b t) c h w -> b c t h w', b=b, t=t)
+
+    def _apply_graph_stage(self, x, stage_idx):
+        b, c, t, h, w = x.size()
+        x_flat = rearrange(x, 'b c t h w -> (b t) c h w')
+        x_flat = x_flat + self.frame_graphs[stage_idx](x_flat) * self.alpha[stage_idx, 0]
+        x_flat = x_flat + self.cross_frame_graphs[stage_idx](x_flat, b) * self.alpha[stage_idx, 1]
+        return rearrange(x_flat, '(b t) c h w -> b c t h w', b=b)
+
+    def _build_dmlg_stages(self, x):
+        _, _, _, base_h, base_w = x.shape
+        stages = []
+        cur = x
+        for idx in range(4):
+            target_size = self._stage_size(base_h, base_w, idx)
+            cur = self._spatial_pool(cur, target_size)
+            cur = self._apply_graph_stage(cur, idx)
+            stages.append(cur)
+        return stages
+
+    def forward(self, x: torch.Tensor) -> dict:
         N, C, T, H, W = x.size()
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.maxpool(x)
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-
-        N, C, T, H, W = x.size()
-        x = rearrange(x, 'N C T H W -> (N T) C H W')
-        x = x + self.localG(x) * self.alpha[0]
-        x = x + self.temporalG(x, N) * self.alpha[1]
-        x = rearrange(x, '(N T) C H W -> N C T H W', N=N)
-
         x = self.layer4(x)
 
-        N, C, T, H, W = x.size()
-        x = rearrange(x, 'N C T H W -> (N T) C H W')
-        x = x + self.localG2(x) * self.alpha[2]
-        x = x + self.temporalG2(x, N) * self.alpha[3]
-        x = rearrange(x, '(N T) C H W -> N C T H W', N=N)
-
-        x = rearrange(x, 'N C T H W -> (N T) C H W')
+        stage_features = self._build_dmlg_stages(x)
+        x = rearrange(stage_features[-1], 'N C T H W -> (N T) C H W')
         x = self.avgpool(x).squeeze(-1).squeeze(-1)
-        x = self.fc(x)
+        x = self.fc(x).view(N, T, -1).permute(0, 2, 1).contiguous()
 
-        return x
+        return {
+            "sequence_features": x,
+            "stage_features": stage_features,
+        }
 
 
 def resnet18(**kwargs):

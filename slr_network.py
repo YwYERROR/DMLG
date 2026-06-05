@@ -4,9 +4,8 @@ import torch.nn.functional as F
 
 import modules.resnet as resnet
 import utils
-from modules import BiLSTMLayer, TemporalConv
+from modules import BiLSTMLayer, DynamicMultiScaleAggregationModule, TemporalConv
 from modules.loss import SeqKD
-from modules.cluster_spatial_module import ClusterBasedSpatialAwarenessModule
 
 class Identity(nn.Module):
     def __init__(self):
@@ -41,17 +40,17 @@ class SLRModel(nn.Module):
         self.loss_weights = loss_weights
         self.conv2d = getattr(resnet, c2d_type)()
         self.conv2d.fc = Identity()
+        self.multiscale_aggregation = DynamicMultiScaleAggregationModule(
+            in_channels=[512, 512, 512, 512],
+            aligned_channels=512,
+            target_size=(7, 7)
+        )
 
         self.conv1d = TemporalConv(input_size=512,
                                    hidden_size=hidden_size,
                                    conv_type=conv_type,
                                    use_bn=use_bn,
                                    num_classes=num_classes)
-
-        self.spatial_module = ClusterBasedSpatialAwarenessModule(
-            feature_dim=hidden_size,  # 与TemporalConv输出维度相同
-            window_levels=[3, 5, 7]   # 三级窗口，可根据需要调整
-        )
 
         self.decoder = utils.Decode(gloss_dict, num_classes, 'beam')
         self.temporal_model = BiLSTMLayer(rnn_type='LSTM', input_size=hidden_size, hidden_size=hidden_size,
@@ -83,15 +82,18 @@ class SLRModel(nn.Module):
 
         if len(x.shape) == 5:
             batch, temp, channel, height, width = x.shape
-            framewise = self.conv2d(x.permute(0, 2, 1, 3, 4)).view(batch, temp, -1).permute(0, 2, 1)
+            visual_outputs = self.conv2d(x.permute(0, 2, 1, 3, 4))
+            if isinstance(visual_outputs, dict) and "stage_features" in visual_outputs:
+                framewise = self.multiscale_aggregation(visual_outputs["stage_features"])
+            elif isinstance(visual_outputs, dict):
+                framewise = visual_outputs["sequence_features"]
+            else:
+                framewise = visual_outputs.view(batch, temp, -1).permute(0, 2, 1)
         else:
             framewise = x
         conv1d_outputs = self.conv1d(framewise, len_x)
         x = conv1d_outputs['visual_feat']
         lgt = conv1d_outputs['feat_len'].cpu()
-
-        # 在1D卷积与BiLSTM之间添加空间感知模块
-        x = self.spatial_module(x)  # 增强特征的时空一致性
         
         tm_outputs = self.temporal_model(x, lgt)
         outputs = self.classifier(tm_outputs['predictions'])

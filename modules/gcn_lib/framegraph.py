@@ -26,7 +26,7 @@ class MRConv(nn.Module):
 
 
 class LSGC(nn.Module):
-    def __init__(self, in_channels, out_channels, expansion_rate=2):
+    def __init__(self, in_channels, out_channels, expansion_rate=1):
         super(LSGC, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -80,14 +80,14 @@ class LSGC(nn.Module):
         # 使用roll函数进行循环移位，确保输出尺寸与输入一致
         if dim == 2:  # 垂直方向扩展（高度）
             if direction == 'forward':
-                return torch.roll(x, shifts=effective_shift, dims=2)
-            elif direction == 'backward':
                 return torch.roll(x, shifts=-effective_shift, dims=2)
+            elif direction == 'backward':
+                return torch.roll(x, shifts=effective_shift, dims=2)
         elif dim == 3:  # 水平方向扩展（宽度）
             if direction == 'forward':
-                return torch.roll(x, shifts=effective_shift, dims=3)
-            elif direction == 'backward':
                 return torch.roll(x, shifts=-effective_shift, dims=3)
+            elif direction == 'backward':
+                return torch.roll(x, shifts=effective_shift, dims=3)
 
         return x  # 防止未知情况
 
@@ -97,38 +97,42 @@ class LSGC(nn.Module):
         # 计算位深度
         bit_depth_h = self.compute_bit_depth(H)
         bit_depth_w = self.compute_bit_depth(W)
-        max_bit_depth = max(bit_depth_h, bit_depth_w)
 
-        # 计算扩展步长
-        steps = self.compute_expansion_steps(max_bit_depth)
+        # 分别按高度和宽度计算扩展步长，对应论文中的 h=ceil(log2 H), w=ceil(log2 W)。
+        vertical_steps = self.compute_expansion_steps(bit_depth_h)
+        horizontal_steps = self.compute_expansion_steps(bit_depth_w)
 
         # 初始化特征差异存储
         feature_diffs = []
 
         # 四个方向扩展并计算特征差异
-        for step in steps:
+        for step in horizontal_steps:
             # 向右扩展
             x_right = self.expand_feature(x, step, dim=3, direction='forward')
-            diff_right = x - x_right
+            diff_right = x_right - x
             feature_diffs.append(diff_right)
 
             # 向左扩展
             x_left = self.expand_feature(x, step, dim=3, direction='backward')
-            diff_left = x - x_left
+            diff_left = x_left - x
             feature_diffs.append(diff_left)
 
+        for step in vertical_steps:
             # 向下扩展
             x_down = self.expand_feature(x, step, dim=2, direction='forward')
-            diff_down = x - x_down
+            diff_down = x_down - x
             feature_diffs.append(diff_down)
 
             # 向上扩展
             x_up = self.expand_feature(x, step, dim=2, direction='backward')
-            diff_up = x - x_up
+            diff_up = x_up - x
             feature_diffs.append(diff_up)
 
         # 特征差异的逐元素最大池化
-        feature_max = torch.stack(feature_diffs, dim=0).max(dim=0)[0]
+        if len(feature_diffs) > 0:
+            feature_max = torch.stack(feature_diffs, dim=0).max(dim=0)[0]
+        else:
+            feature_max = torch.zeros_like(x)
 
         # 处理特征差异
         x_diff_processed = self.diff_conv(feature_max)
@@ -145,7 +149,7 @@ class LSGC(nn.Module):
 
 
 class FrameFeatureGraph(nn.Module):
-    def __init__(self, in_channels, out_channels, expansion_rate=2):
+    def __init__(self, in_channels, out_channels, expansion_rate=1):
         super(FrameFeatureGraph, self).__init__()
         self.graph_construction = LSGC(
             in_channels,

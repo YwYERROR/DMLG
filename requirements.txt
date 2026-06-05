@@ -6,3 +6,11 @@ PyYAML==6.0
 scipy==1.9.1
 six==1.16.0
 tqdm==4.62.3
+einops
+timm
+torch
+torchvision
+torch_geometric
+tensorboard
+wandb
+ctcdecode

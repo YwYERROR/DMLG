@@ -40,14 +40,14 @@ class DyGraphConv2d(GraphConv2d):
     """
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 9,
                  dilation: int = 1, act: str = 'gelu', norm: str = None,
-                 bias: bool = True, r: int = 1):
+                 bias: bool = True, r: int = 1, expansion_rate: int = 1):
         super(DyGraphConv2d, self).__init__(in_channels, out_channels, act, norm, bias)
         self.r = r
         # LSGC graph builder
         self.graph_builder = FrameFeatureGraph(
             in_channels=in_channels,
             out_channels=out_channels,
-            expansion_rate=2
+            expansion_rate=expansion_rate
         )
 
     def forward(self, x, relative_pos=None):
@@ -74,7 +74,8 @@ class DyGraphConv2d(GraphConv2d):
 class Grapher(nn.Module):
     def __init__(self, in_channels: int, kernel_size: int = 9, dilation: int = 1,
                  act: str = 'gelu', norm: str = None, bias: bool = True, r: int = 1,
-                 n: int = 196, drop_path: float = 0.0, relative_pos: bool = False):
+                 n: int = 196, drop_path: float = 0.0, relative_pos: bool = False,
+                 expansion_rate: int = 1):
         super(Grapher, self).__init__()
         self.channels = in_channels
         self.n = n  # 典型地 n = H * W（或其他）
@@ -88,7 +89,7 @@ class Grapher(nn.Module):
 
         # 动态图卷积
         self.graph_conv = DyGraphConv2d(in_channels, in_channels * 2, kernel_size, dilation,
-                                        act, norm, bias, r)
+                                        act, norm, bias, r, expansion_rate=expansion_rate)
         # 后置 1x1 卷积
         self.fc2 = nn.Sequential(
             nn.Conv2d(in_channels * 2, in_channels, 1, stride=1, padding=0),

@@ -18,6 +18,9 @@ class Processor():
         shutil.copy2('./configs/baseline.yaml', self.arg.work_dir)
         shutil.copy2('./modules/tconv.py', self.arg.work_dir)
         shutil.copy2('./modules/resnet.py', self.arg.work_dir)
+        shutil.copy2('./modules/dmam.py', self.arg.work_dir)
+        shutil.copy2('./modules/gcn_lib/framegraph.py', self.arg.work_dir)
+        shutil.copy2('./modules/gcn_lib/torch_vertex.py', self.arg.work_dir)
         shutil.copy2('./modules/gcn_lib/temporalgraph.py', self.arg.work_dir)
         torch.backends.cudnn.benchmark = True
         if type(self.arg.device) is not int:

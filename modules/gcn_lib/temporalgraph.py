@@ -1,13 +1,41 @@
-from torch_geometric.nn import GCNConv
 import torch.nn as nn
 import torch
 from einops import rearrange
 import torch.nn.functional as F
-import numpy as np
+
+
+class TemporalMaxRelativeConv(nn.Module):
+    """Max-Relative graph convolution for flattened temporal graph nodes."""
+
+    def __init__(self, channels):
+        super(TemporalMaxRelativeConv, self).__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(channels * 2, channels),
+            nn.LayerNorm(channels),
+            nn.GELU()
+        )
+
+    def forward(self, x, edge_index):
+        if edge_index.numel() == 0:
+            return x
+
+        src, dst = edge_index[0], edge_index[1]
+        rel = x[src] - x[dst]
+        max_rel = torch.full_like(x, -torch.inf)
+        scatter_index = dst.unsqueeze(-1).expand_as(rel)
+
+        if hasattr(max_rel, "scatter_reduce_"):
+            max_rel.scatter_reduce_(0, scatter_index, rel, reduce='amax', include_self=True)
+        else:
+            for node in torch.unique(dst):
+                max_rel[node] = rel[dst == node].max(dim=0)[0]
+
+        max_rel = torch.where(torch.isfinite(max_rel), max_rel, torch.zeros_like(max_rel))
+        return x + self.proj(torch.cat([x, max_rel], dim=-1))
 
 
 class TemporalFeatureGraph(nn.Module):
-    def __init__(self, in_channels, k=4, initial_threshold=0.9, threshold_decay=0.1, layer_idx=1,
+    def __init__(self, in_channels, k=4, initial_threshold=0.8, threshold_decay=0.05, layer_idx=1,
                  use_dynamic_threshold=True):
         super(TemporalFeatureGraph, self).__init__()
         self.k = k  # 保留k参数以兼容现有代码
@@ -20,11 +48,11 @@ class TemporalFeatureGraph(nn.Module):
             nn.Conv3d(in_channels, self.reduction_channel, kernel_size=(3, 1, 1), bias=False, padding=(1, 0, 0)),
             nn.BatchNorm3d(self.reduction_channel)
         )
-        self.gconv = GCNConv(self.reduction_channel, self.reduction_channel)
+        self.gconv = TemporalMaxRelativeConv(self.reduction_channel)
 
         # 动态阈值参数
         self.use_dynamic_threshold = use_dynamic_threshold  # 是否使用动态阈值
-        self.initial_threshold = initial_threshold  # 初始阈值 t_1
+        self.initial_threshold = initial_threshold  # 初始阈值 t0
         self.threshold_decay = threshold_decay  # 递减步长 Δt
         self.layer_idx = layer_idx  # 当前层索引 l
 
@@ -44,55 +72,53 @@ class TemporalFeatureGraph(nn.Module):
         b, t_1, hw, hw = sim.shape
 
         if self.use_dynamic_threshold:
-            # 实现论文中的方法：计算全局均值和标准差
-            sim_flat = sim.reshape(b, t_1, -1)
-            mu_s = sim_flat.mean(dim=-1, keepdim=True)  # 公式(10)
-            sigma_s = sim_flat.std(dim=-1, keepdim=True)  # 公式(11)
+            if hw == 1:
+                edge_indices = []
+                for _ in range(b):
+                    if t_1 > 0:
+                        src = torch.arange(t_1, device=x.device, dtype=torch.long)
+                        dst = src + 1
+                        forward_edges = torch.stack((src, dst), dim=0)
+                        reverse_edges = torch.stack((dst, src), dim=0)
+                        edge_indices.append(torch.cat((forward_edges, reverse_edges), dim=1))
+                    else:
+                        edge_indices.append(torch.empty((2, 0), dtype=torch.long, device=x.device))
+            else:
+                # 实现论文中的方法：计算全局均值和标准差
+                sim_flat = sim.reshape(b, t_1, -1)
+                mu_s = sim_flat.mean(dim=-1, keepdim=True)  # 公式(10)
+                sigma_s = sim_flat.std(dim=-1, keepdim=True, unbiased=False)  # 公式(11)
 
-            # Z-score归一化相似性分数
-            sim_norm = (sim_flat - mu_s) / (sigma_s + 1e-8)  # 公式(12)
-            sim_norm = sim_norm.view(b, t_1, hw, hw)
+                # Z-score归一化相似性分数
+                sim_norm = (sim_flat - mu_s) / (sigma_s + 1e-8)  # 公式(12)
+                sim_norm = sim_norm.view(b, t_1, hw, hw)
 
-            # 计算动态阈值
-            t_l = self.initial_threshold - (self.layer_idx - 1) * self.threshold_decay  # 公式(13)
+                # 计算动态阈值
+                t_l = self.initial_threshold - (self.layer_idx - 1) * self.threshold_decay  # 公式(13)
 
-            # 计算标准正态分布逆累积分布函数的阈值
-            # 使用近似计算，避免依赖scipy
-            norm_threshold = norm_ppf(t_l)
-            norm_threshold = torch.tensor(norm_threshold).to(x.device)
+                # 计算标准正态分布逆累积分布函数的阈值，避免依赖 scipy。
+                norm_threshold = x.new_tensor(norm_ppf(t_l))
 
-            # 根据阈值创建边
-            finaledge = torch.zeros((b, t_1 * hw * hw, 2), dtype=torch.long)
-            edge_count = torch.zeros((b, t_1), dtype=torch.long)
+                # 根据阈值创建边
+                edge_indices = []
 
-            for b_idx in range(b):
-                for t_idx in range(t_1):
-                    # 获取满足条件的边
-                    curr_edges = (sim_norm[b_idx, t_idx] > norm_threshold).nonzero()
+                for b_idx in range(b):
+                    batch_edges = []
+                    for t_idx in range(t_1):
+                        # 获取满足条件的边
+                        curr_edges = (sim_norm[b_idx, t_idx] > norm_threshold).nonzero(as_tuple=False)
 
-                    if curr_edges.size(0) > 0:
-                        # 限制边的数量，避免内存问题
-                        max_edges = min(curr_edges.size(0), hw * 10)  # 每个节点最多10个边
-                        if curr_edges.size(0) > max_edges:
-                            perm = torch.randperm(curr_edges.size(0))[:max_edges]
-                            curr_edges = curr_edges[perm]
+                        if curr_edges.size(0) > 0:
+                            src = curr_edges[:, 0] + t_idx * hw
+                            dst = curr_edges[:, 1] + (t_idx + 1) * hw
+                            batch_edges.append(torch.stack((src, dst), dim=0))
 
-                        edges_count = curr_edges.size(0)
-                        edge_count[b_idx, t_idx] = edges_count
-
-                        # 设置边的索引
-                        finaledge[b_idx, t_idx * hw * hw:t_idx * hw * hw + edges_count, 0] = curr_edges[:,
-                                                                                             0] + t_idx * hw
-                        finaledge[b_idx, t_idx * hw * hw:t_idx * hw * hw + edges_count, 1] = curr_edges[:, 1] + (
-                                    t_idx + 1) * hw
-
-            # 移除多余的零
-            max_edges_per_batch = torch.sum(edge_count, dim=1).max().item()
-            finaledge = finaledge[:, :max_edges_per_batch, :]
-
-            # 创建反向边
-            finaledge_re = torch.stack((finaledge[:, :, 1], finaledge[:, :, 0]), dim=-1)
-            finaledge = torch.cat((finaledge, finaledge_re), dim=1).permute(0, 2, 1)
+                    if len(batch_edges) > 0:
+                        forward_edges = torch.cat(batch_edges, dim=1).long()
+                        reverse_edges = torch.stack((forward_edges[1], forward_edges[0]), dim=0)
+                        edge_indices.append(torch.cat((forward_edges, reverse_edges), dim=1))
+                    else:
+                        edge_indices.append(torch.empty((2, 0), dtype=torch.long, device=x.device))
 
         else:
             sim = F.normalize(sim.view(b, t_1, -1), dim=-1)
@@ -101,21 +127,23 @@ class TemporalFeatureGraph(nn.Module):
             row_indices = torch.div(topk_indices, hw, rounding_mode='trunc')
             col_indices = topk_indices % hw
 
-            finaledge = torch.zeros((b, t_1, self.k, 2), dtype=torch.long)
-            for i in range(t_1):
-                finaledge[:, i, :, 0] = row_indices[:, i, :] + i * hw
-                finaledge[:, i, :, 1] = col_indices[:, i, :] + (i + 1) * hw
-
-            finaledge = finaledge.view(b, t_1 * self.k, 2)
-            finaledge_re = torch.stack((finaledge[:, :, 1], finaledge[:, :, 0]), dim=-1)
-            finaledge = torch.cat((finaledge, finaledge_re), dim=1).permute(0, 2, 1)
+            edge_indices = []
+            for b_idx in range(b):
+                batch_edges = []
+                for i in range(t_1):
+                    src = row_indices[b_idx, i, :] + i * hw
+                    dst = col_indices[b_idx, i, :] + (i + 1) * hw
+                    batch_edges.append(torch.stack((src, dst), dim=0))
+                forward_edges = torch.cat(batch_edges, dim=1).long()
+                reverse_edges = torch.stack((forward_edges[1], forward_edges[0]), dim=0)
+                edge_indices.append(torch.cat((forward_edges, reverse_edges), dim=1))
 
         # 应用图卷积
         x = rearrange(x, "b c v n-> b (v n) c")
         out = torch.zeros_like(x).to(x.device)
 
         for i in range(batch):
-            out[i] = self.gconv(x[i], finaledge[i].to(x.device))
+            out[i] = self.gconv(x[i], edge_indices[i].to(x.device))
 
         # 恢复原始形状并应用上卷积
         x = out.permute(0, 2, 1).view(b, self.reduction_channel, tlen // b, h, w)
@@ -136,7 +164,6 @@ def ForEucDis(x, y):
 
 # 标准正态分布的逆累积分布函数的近似计算
 def norm_ppf(p):
-    # 根据https://en.wikipedia.org/wiki/Normal_distribution#Quantile_function的近似公式
     if p < 0 or p > 1:
         raise ValueError("Probability p must be between 0 and 1")
 
@@ -145,17 +172,4 @@ def norm_ppf(p):
     elif p == 1:
         return float('inf')
 
-    # 对称性
-    if p > 0.5:
-        return -norm_ppf(1 - p)
-
-    # 近似计算
-    t = np.sqrt(-2 * np.log(p))
-    c0 = 2.515517
-    c1 = 0.802853
-    c2 = 0.010328
-    d1 = 1.432788
-    d2 = 0.189269
-    d3 = 0.001308
-
-    return t - (c0 + c1 * t + c2 * t ** 2) / (1 + d1 * t + d2 * t ** 2 + d3 * t ** 3)
+    return torch.distributions.Normal(0.0, 1.0).icdf(torch.tensor(float(p))).item()
